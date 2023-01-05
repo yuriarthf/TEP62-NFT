@@ -17,6 +17,7 @@ struct CollectionMetadata {
 message Initialize {
   query_id: Int as uint64;
   owner_address: Address;
+  collection_owner: Address;
   forward_payload: Slice | Cell as notification;
 }
 
@@ -54,7 +55,23 @@ message ReportStaticData(0x8b771735) {
   collection: Address;
 }
 
+message Mint {
+  query_id: Int as uint64;
+  recipient: Address;
+  individual_content: Cell;
+  forward_payload: Slice | Cell as notification;
+}
+
+message MintExcesses {
+  query_id: Int as uint64;
+  message: String;
+}
+
 contract NFTItem {
+
+  const minTonsForStorage: Int = ton("0.01");
+  const gasConsumption: Int = ton("0.01");
+
   index: Int as uint256;
   owner: Address;
   collection: Address;
@@ -73,8 +90,13 @@ contract NFTItem {
   receive(msg: Initialize) {
     let ctx: Context = context();
     require(ctx.sender == this.collection, "Only Collection");
+
+    let fwdFee = ctx.readForwardFee();
+    let minTxDebit = fwdFee + 2 * this.gasConsumption + this.minTonsForStorage;
+    require(ctx.value > minTxDebit, "Invalid value");
+
     this.owner = msg.owner_address;
-    // TODO: Send notification to new owner
+
     send(SendParameters{
       to: msg.owner_address,
       body: Minted{
@@ -82,6 +104,18 @@ contract NFTItem {
         forward_payload: msg.forward_payload
       }.toCell()
     });
+    
+    let remainder: Int = ctx.value - minTxDebit;
+    if (remainder - fwdFee > 0) {
+      send(SendParameters{
+        to: msg.collection_owner,
+        mode: SendRemaining,
+        body: MintExcesses{
+          query_id: msg.query_id,
+          message: "Excesses from Mint"
+        }.toCell()
+      });
+    }
   }
 
   receive(msg: Transfer) {
@@ -146,14 +180,34 @@ contract NFTCollection {
   owner: Address;
   nextItemIndex: Int;
   collectionContent: Cell;
+  totalSupply: Int;
 
   init(owner: Address, collectionContent: Cell) {
     this.owner = owner;
     this.nextItemIndex = 0;
     this.collectionContent = collectionContent;
+    this.totalSupply = 0;
   }
 
-  // TODO: Implement Mint receiver
+  receive(msg: Mint) {
+    let ctx: Context = context();
+    require(ctx.sender == this.owner, "Only Owner");
+    let stateInit: StateInit = getNftItemInit(this.nextItemIndex, msg.individual_content);
+    send(SendParameters{
+      to: contractAddress(stateInit),
+      mode: SendRemaining,
+      body: Initialize{
+        query_id: msg.query_id,
+        owner_address: msg.recipient,
+        collection_owner: this.owner,
+        forward_payload: msg.forward_payload
+      }.toCell(),
+      code: stateInit.code,
+      data: stateInit.data
+    });
+
+    this.totalSupply += 1;
+  }
 
   fun getNftItemInit(index: Int, individualContent: Cell): StateInit {
     return initOf NFTItem(index, myAddress(), individualContent);
